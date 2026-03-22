@@ -235,11 +235,10 @@ test('FreezeHost 自动续期', async () => {
         }
         console.log(`✅ 登录成功！当前：${page.url()}`);
 
-        // ── 续期 ──────────────────────────────────────────────
+        // ── 进入 Server Console ───────────────────────────────
         console.log('🔍 查找 Manage 按钮...');
         await page.waitForTimeout(3000);
 
-        // 用 JS 直接获取链接 href，绕过任何遮罩层
         const serverUrl = await page.evaluate(() => {
             const link = document.querySelector('a[href*="server-console"]');
             return link ? link.href : null;
@@ -253,21 +252,75 @@ test('FreezeHost 自动续期', async () => {
         await page.goto(serverUrl, { waitUntil: 'domcontentloaded' });
         console.log(`✅ 已跳转到 Server Console: ${page.url()}`);
 
-        // ── 点击 RENEW ────────────────────────────────────────
-        console.log('🔍 查找 RENEW 按钮...');
-        await page.waitForTimeout(3000); // 等页面加载完
+        // ── 检查剩余时间，决定是否续期 ───────────────────────
+        console.log('🔍 读取续期状态...');
+        await page.waitForTimeout(3000);
 
-        const renewUrl = await page.evaluate(() => {
-            const link = document.getElementById('renew-link');
-            return link ? link.href : null;
+        const renewalStatusText = await page.evaluate(() => {
+            const el = document.getElementById('renewal-status-console');
+            return el ? el.innerText.trim() : null;
         });
 
-        if (!renewUrl || renewUrl.endsWith('#')) {
-            throw new Error(`❌ renew-link 未加载或无效：${renewUrl}`);
+        console.log(`📋 续期状态：${renewalStatusText}`);
+
+        if (renewalStatusText) {
+            // 解析剩余天数，如 "Renewed, 12 days and 19.6 hours Remaining."
+            const daysMatch = renewalStatusText.match(/(\d+(?:\.\d+)?)\s*day/i);
+            const remainingDays = daysMatch ? parseFloat(daysMatch[1]) : null;
+
+            if (remainingDays !== null) {
+                console.log(`⏳ 剩余天数：${remainingDays}`);
+                if (remainingDays > 2) {
+                    const msg = `⏰ 剩余 ${remainingDays} 天，无需续期（需 ≤2 天才续期）`;
+                    console.log(msg);
+                    await sendTG(msg);
+                    // 正常跳过，不报错
+                    return;
+                }
+                console.log(`✅ 剩余 ${remainingDays} 天，需要续期，继续操作...`);
+            } else {
+                console.log('⚠️ 无法解析剩余天数，尝试继续续期...');
+            }
+        } else {
+            console.log('⚠️ 未找到 renewal-status-console，尝试继续续期...');
         }
 
-        console.log(`✅ 找到 RENEW 链接：${renewUrl}`);
-        await page.goto(renewUrl, { waitUntil: 'domcontentloaded' });
+        // ── 点击外链图标打开续期弹窗 ─────────────────────────
+        console.log('🔍 查找外链图标按钮...');
+        // 父级可点击元素通常包裹着 <i> 图标，点击父元素更可靠
+        const externalLinkBtn = page.locator('i.fa-external-link-alt').first();
+        await externalLinkBtn.waitFor({ state: 'visible', timeout: 10000 });
+        await externalLinkBtn.click();
+        console.log('✅ 已点击外链图标，等待弹窗...');
+        await page.waitForTimeout(2000);
+
+        // ── 检查续期弹窗按钮状态 ─────────────────────────────
+        console.log('🔍 查找弹窗中的续期按钮...');
+        const renewModalBtn = page.locator('#renew-link-modal');
+        await renewModalBtn.waitFor({ state: 'visible', timeout: 10000 });
+
+        const btnText = (await renewModalBtn.innerText()).trim();
+        const btnClass = (await renewModalBtn.getAttribute('class')) || '';
+        const isDisabled = btnClass.includes('pointer-events-none') || btnClass.includes('opacity-50');
+
+        console.log(`📋 续期按钮文字："${btnText}"，禁用：${isDisabled}`);
+
+        if (isDisabled || btnText.toLowerCase().includes('not renewable')) {
+            const msg = `⏰ 尚未到续期时间（按钮状态：${btnText}）`;
+            console.log(msg);
+            await sendTG('⏰ 尚未到续期时间，今日已续期或暂不需要续期');
+            // 不报错，正常通过
+            return;
+        }
+
+        // ── 点击续期按钮跳转 ──────────────────────────────────
+        const renewHref = await renewModalBtn.getAttribute('href');
+        if (!renewHref || renewHref === '#') {
+            throw new Error(`❌ renew-link-modal href 无效：${renewHref}`);
+        }
+
+        console.log(`✅ 找到 RENEW 链接：${renewHref}`);
+        await page.goto(renewHref, { waitUntil: 'domcontentloaded' });
         console.log('📤 已跳转 RENEW，等待结果...');
 
         await page.waitForURL(
@@ -277,23 +330,22 @@ test('FreezeHost 自动续期', async () => {
         const finalUrl = page.url();
 
         // ── 结果判断 ──────────────────────────────────────────
-         if (finalUrl.includes('success=RENEWED')) {
-             console.log('🎉 续期成功！');
-             await sendTG('✅ 续期成功！');
-             expect(finalUrl).toContain('success=RENEWED');
-         } else if (finalUrl.includes('err=CANNOTAFFORDRENEWAL')) {
-             console.log('⚠️ 余额不足，无法续期');
-             await sendTG('⚠️ 余额不足，请前往挂机页面赚取金币');
-             test.skip(true, '余额不足');
-         } else if (finalUrl.includes('err=TOOEARLY')) {
-             console.log('⏰ 尚未到续期时间，无需操作');
-             await sendTG('⏰ 尚未到续期时间，今日已续期或暂不需要续期');
-             // 不报错，正常通过
-             
-         } else {
-             await sendTG(`⚠️ 续期结果未知：${finalUrl}`);
-             throw new Error('续期结果未知，URL: ' + finalUrl);
-         }
+        if (finalUrl.includes('success=RENEWED')) {
+            console.log('🎉 续期成功！');
+            await sendTG('✅ 续期成功！');
+            expect(finalUrl).toContain('success=RENEWED');
+        } else if (finalUrl.includes('err=CANNOTAFFORDRENEWAL')) {
+            console.log('⚠️ 余额不足，无法续期');
+            await sendTG('⚠️ 余额不足，请前往挂机页面赚取金币');
+            test.skip(true, '余额不足');
+        } else if (finalUrl.includes('err=TOOEARLY')) {
+            console.log('⏰ 尚未到续期时间，无需操作');
+            await sendTG('⏰ 尚未到续期时间，今日已续期或暂不需要续期');
+            // 不报错，正常通过
+        } else {
+            await sendTG(`⚠️ 续期结果未知：${finalUrl}`);
+            throw new Error('续期结果未知，URL: ' + finalUrl);
+        }
 
     } catch (e) {
         if (!e.message?.includes('余额不足')) {
