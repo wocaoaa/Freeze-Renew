@@ -14,27 +14,6 @@ function nowStr() {
     }).replace(/\//g, '-');
 }
 
-// 清理广告和遮罩层的函数
-async function cleanAds(page) {
-    console.log('🧹 正在清理可能存在的广告和遮罩层...');
-    await page.evaluate(() => {
-        // 1. 移除常见的广告选择器 (ID 或 Class)
-        const adSelectors = [
-            'iframe[id*="google_ads"]', 'div[class*="adsbygoogle"]', 
-            '.modal-backdrop', '.ad-container', '#dismiss-button',
-            'div[aria-label="Close ad"]', 'ins.adsbygoogle'
-        ];
-        adSelectors.forEach(s => {
-            document.querySelectorAll(s).forEach(el => el.remove());
-        });
-
-        // 2. 强制恢复页面滚动（有些广告关闭后会锁定 body）
-        document.body.style.overflow = 'auto';
-        document.documentElement.style.overflow = 'auto';
-    });
-    await page.waitForTimeout(1000);
-}
-
 function sendTG(result) {
     return new Promise((resolve) => {
         if (!TG_CHAT_ID || !TG_TOKEN) {
@@ -58,7 +37,6 @@ async function handleOAuthPage(page) {
     const selectors = ['button:has-text("Authorize")', 'button:has-text("授权")', 'button[type="submit"]'];
     for (let i = 0; i < 5; i++) {
         if (!page.url().includes('discord.com')) return;
-        await cleanAds(page);
         for (const selector of selectors) {
             try {
                 const btn = page.locator(selector).last();
@@ -69,10 +47,11 @@ async function handleOAuthPage(page) {
                 }
             } catch { continue; }
         }
+        await page.waitForTimeout(1000);
     }
 }
 
-test('FreezeHost 自动续期 (增强防广告版)', async () => {
+test('FreezeHost 自动续期 (多服务器稳健版)', async () => {
     if (!DISCORD_EMAIL || !DISCORD_PASSWORD) throw new Error('❌ 缺少账号配置');
 
     let proxyConfig = process.env.GOST_PROXY ? { server: 'http://127.0.0.1:8080' } : undefined;
@@ -85,8 +64,7 @@ test('FreezeHost 自动续期 (增强防广告版)', async () => {
 
     try {
         console.log('🔑 登录中...');
-        await page.goto('https://free.freezehost.pro', { waitUntil: 'domcontentloaded' });
-        await cleanAds(page);
+        await page.goto('https://free.freezehost.pro', { waitUntil: 'networkidle' });
         
         await page.click('span.text-lg:has-text("Login with Discord")', { force: true });
         const confirmBtn = page.locator('button#confirm-login');
@@ -98,13 +76,16 @@ test('FreezeHost 自动续期 (增强防广告版)', async () => {
         await page.fill('input[name="password"]', DISCORD_PASSWORD);
         await page.click('button[type="submit"]', { force: true });
 
-        if (page.url().includes('discord.com/oauth2/authorize')) {
+        // 处理 Discord 授权
+        try {
+            await page.waitForURL(/discord\.com\/oauth2\/authorize/, { timeout: 10000 });
             await handleOAuthPage(page);
+        } catch {
+            console.log('ℹ️ 未检测到 OAuth 页面，可能已自动授权');
         }
 
         await page.waitForURL(/free\.freezehost\.pro\/dashboard/, { timeout: 30000 });
-        await page.waitForTimeout(3000);
-        await cleanAds(page);
+        await page.waitForTimeout(5000); // 额外等待 Dashboard 加载
 
         // 获取所有服务器链接
         const serverUrls = await page.evaluate(() => {
@@ -118,8 +99,9 @@ test('FreezeHost 自动续期 (增强防广告版)', async () => {
             const serverId = targetUrl.split('id=')[1] || `S${i+1}`;
             
             try {
-                await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
-                await cleanAds(page);
+                console.log(`🚀 正在进入服务器: ${serverId}`);
+                await page.goto(targetUrl, { waitUntil: 'networkidle' });
+                await page.waitForTimeout(3000);
 
                 const statusText = await page.evaluate(() => document.getElementById('renewal-status-console')?.innerText.trim() || '未知');
                 const daysMatch = statusText.match(/(\d+(?:\.\d+)?)\s*day/i);
@@ -132,31 +114,33 @@ test('FreezeHost 自动续期 (增强防广告版)', async () => {
 
                 // 准备点击续期
                 const icon = page.locator('i.fa-external-link-alt').first();
+                await icon.scrollIntoViewIfNeeded();
                 await icon.locator('xpath=..').hover();
-                await page.waitForTimeout(1000);
+                await page.waitForTimeout(2000);
                 await icon.click({ force: true });
                 
                 const renewBtn = page.locator('#renew-link-modal');
-                await renewBtn.waitFor({ state: 'visible' });
+                await renewBtn.waitFor({ state: 'visible', timeout: 10000 });
                 
-                if ((await renewBtn.innerText()).toLowerCase().includes('renew instance')) {
+                const btnText = (await renewBtn.innerText()).trim();
+                if (btnText.toLowerCase().includes('renew instance')) {
                     const href = await renewBtn.getAttribute('href');
                     
-                    // 核心逻辑：跳转到最终续期页，先清广告，再强制点击
-                    await page.goto(new URL(href, page.url()).href);
-                    await page.waitForTimeout(2000);
-                    await cleanAds(page); // 最终页清理广告
-
-                    // 再次检查是否回到了 dashboard 且 URL 带有结果
+                    // 跳转最终续期
+                    await page.goto(new URL(href, page.url()).href, { waitUntil: 'networkidle' });
+                    
+                    // 等待返回 Dashboard 结果
                     await page.waitForURL(/success|err|dashboard/, { timeout: 20000 });
                     const res = page.url();
+                    
                     if (res.includes('success=RENEWED')) summaryResults.push(`✅ 服务器 ${serverId}: 成功`);
-                    else if (res.includes('err=CANNOTAFFORDRENEWAL')) summaryResults.push(`❌ 服务器 ${serverId}: 没钱了`);
-                    else summaryResults.push(`⚠️ 服务器 ${serverId}: 状态未知`);
+                    else if (res.includes('err=CANNOTAFFORDRENEWAL')) summaryResults.push(`❌ 服务器 ${serverId}: 余额不足`);
+                    else summaryResults.push(`⚠️ 服务器 ${serverId}: 状态未知 (${res.split('?')[1] || '无参数'})`);
                 } else {
-                    summaryResults.push(`🟡 服务器 ${serverId}: 暂不可续期`);
+                    summaryResults.push(`🟡 服务器 ${serverId}: 暂不可续期 (${btnText})`);
                 }
             } catch (err) {
+                console.error(`❌ 服务器 ${serverId} 出错:`, err.message);
                 summaryResults.push(`❌ 服务器 ${serverId}: 脚本异常`);
             }
         }
