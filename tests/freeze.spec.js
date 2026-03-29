@@ -33,7 +33,7 @@ function sendTG(result) {
 }
 
 async function handleOAuthPage(page) {
-    console.log(`  📄 授权处理中...`);
+    console.log(`  📄 正在处理 Discord 授权...`);
     const selectors = ['button:has-text("Authorize")', 'button:has-text("授权")', 'button[type="submit"]'];
     for (let i = 0; i < 5; i++) {
         if (!page.url().includes('discord.com')) return;
@@ -76,16 +76,13 @@ test('FreezeHost 自动续期 (多服务器稳健版)', async () => {
         await page.fill('input[name="password"]', DISCORD_PASSWORD);
         await page.click('button[type="submit"]', { force: true });
 
-        // 处理 Discord 授权
         try {
             await page.waitForURL(/discord\.com\/oauth2\/authorize/, { timeout: 10000 });
             await handleOAuthPage(page);
-        } catch {
-            console.log('ℹ️ 未检测到 OAuth 页面，可能已自动授权');
-        }
+        } catch { console.log('ℹ️ 未检测到 OAuth 页面，可能已自动授权'); }
 
         await page.waitForURL(/free\.freezehost\.pro\/dashboard/, { timeout: 30000 });
-        await page.waitForTimeout(5000); // 额外等待 Dashboard 加载
+        await page.waitForTimeout(5000); 
 
         // 获取所有服务器链接
         const serverUrls = await page.evaluate(() => {
@@ -135,7 +132,7 @@ test('FreezeHost 自动续期 (多服务器稳健版)', async () => {
                     
                     if (res.includes('success=RENEWED')) summaryResults.push(`✅ 服务器 ${serverId}: 成功`);
                     else if (res.includes('err=CANNOTAFFORDRENEWAL')) summaryResults.push(`❌ 服务器 ${serverId}: 余额不足`);
-                    else summaryResults.push(`⚠️ 服务器 ${serverId}: 状态未知 (${res.split('?')[1] || '无参数'})`);
+                    else summaryResults.push(`⚠️ 服务器 ${serverId}: 状态未知`);
                 } else {
                     summaryResults.push(`🟡 服务器 ${serverId}: 暂不可续期 (${btnText})`);
                 }
